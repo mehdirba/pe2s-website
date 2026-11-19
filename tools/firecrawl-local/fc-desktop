@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# fc-desktop on|off|status [--restart]
+# Adds/removes the firecrawl-local MCP server in Claude Desktop's config without touching other servers.
+# 'off' stashes the entry outside the config, so Desktop never loads its tool schemas (zero baseline tokens).
+set -euo pipefail
+CFG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+STASH="$HOME/.config/fc/desktop-entry.json"
+FCL="$(command -v firecrawl-local || echo "$HOME/.cargo/bin/firecrawl-local")"
+cmd="${1:-status}"; restart="${2:-}"
+mkdir -p "$(dirname "$STASH")" "$(dirname "$CFG")"
+
+CFG="$CFG" STASH="$STASH" FCL="$FCL" CMD="$cmd" /usr/bin/python3 - <<'PY'
+import json, os, shutil, time, sys
+cfg, stash, cmd = os.environ["CFG"], os.environ["STASH"], os.environ["CMD"]
+default = {
+  "command": os.environ["FCL"],
+  "args": ["mcp", "--public-only"],
+  "env": {
+    # Desktop launches with a minimal PATH; firecrawl-local mcp needs npx (Node 22+)
+    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + os.path.expanduser("~/.cargo/bin"),
+    "FIRECRAWL_LOCAL_BROWSER": "auto",
+  },
+}
+data = {}
+if os.path.exists(cfg):
+    with open(cfg) as f:
+        txt = f.read().strip()
+    data = json.loads(txt) if txt else {}
+servers = data.setdefault("mcpServers", {})
+on = "firecrawl" in servers
+if cmd == "status":
+    print("firecrawl MCP:", "ON" if on else "OFF", "| other servers:", ", ".join(k for k in servers if k != "firecrawl") or "none")
+    sys.exit(0)
+if cmd not in ("on", "off"):
+    sys.exit("usage: fc-desktop on|off|status [--restart]")
+if os.path.exists(cfg):
+    shutil.copy2(cfg, f"{cfg}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+if cmd == "off":
+    if not on: print("already OFF"); sys.exit(0)
+    with open(stash, "w") as f: json.dump(servers.pop("firecrawl"), f, indent=2)
+else:
+    if on: print("already ON"); sys.exit(0)
+    entry = default
+    if os.path.exists(stash):
+        with open(stash) as f: entry = json.load(f)
+    servers["firecrawl"] = entry
+tmp = cfg + ".tmp"
+with open(tmp, "w") as f: json.dump(data, f, indent=2)
+os.replace(tmp, cfg)
+print("firecrawl MCP:", cmd.upper(), "(restart Claude Desktop to apply)")
+PY
+
+if [ "$restart" = "--restart" ] && [ "$cmd" != "status" ]; then
+  osascript -e 'quit app "Claude"' 2>/dev/null || true
+  sleep 2; open -a Claude
+fi

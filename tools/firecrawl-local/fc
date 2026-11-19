@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# fc — token-minimal web reader on top of firecrawl-local.
+# Static fetch first; headless Chrome only when the page needs JS (firecrawl-local --browser auto).
+# Output: main-content Markdown, compacted (no images, link URLs stripped, tables de-padded), capped.
+# Raw scrape is cached 24h so follow-up -s/-g/-t queries cost zero network and minimal tokens.
+# bash 3.2 compatible (macOS default shell).
+set -euo pipefail
+
+FCL="${FCL_BIN:-$(command -v firecrawl-local || echo "$HOME/.cargo/bin/firecrawl-local")}"
+[ -f "$HOME/.config/fc/config" ] && . "$HOME/.config/fc/config"
+export FIRECRAWL_LOCAL_BROWSER="${FIRECRAWL_LOCAL_BROWSER:-auto}"
+export FIRECRAWL_CLOUD="${FIRECRAWL_CLOUD:-auto}"   # auto: blocked pages fall back to Firecrawl Cloud; 'off' = fully local
+CACHE="${FC_CACHE:-$HOME/.cache/fc}"
+TTL_MIN="${FC_TTL_MIN:-1440}"
+MAX="${FC_MAX:-12000}"
+
+usage() {
+  cat <<'EOF'
+fc [opts] <url>          main-content markdown, compacted, capped (works for HTML, PDF, DOCX)
+  -t        outline only (headings) — cheapest probe
+  -s RE     only sections whose heading matches RE (case-insensitive), with subsections
+  -g RE     only lines matching RE (case-insensitive), 1 line of context
+  -m N      cap output at N chars (default 12000, 0 = no cap)
+  -L        keep link URLs        -I  keep images
+  -j        force Chrome render   -S  scroll rendered page (lazy-loaded catalogs)
+  -F        keep nav/header/footer
+  -r        refresh (ignore cache)
+fc map <url> [keyword]   list site URLs (optionally filtered), max 200
+EOF
+}
+
+[ $# -eq 0 ] && { usage; exit 1; }
+
+if [ "$1" = "map" ]; then
+  shift; url="${1:?url}"; kw="${2:-}"
+  if [ -n "$kw" ]; then "$FCL" map "$url" --search "$kw" --limit 200
+  else "$FCL" map "$url" --limit 200; fi
+  exit $?
+fi
+
+toc=0; sec=""; grep_re=""; links=0; images=0; js=0; scroll=0; full=0; refresh=0
+while getopts ":ts:g:m:LIjSFrh" o; do
+  case "$o" in
+    t) toc=1;; s) sec="$OPTARG";; g) grep_re="$OPTARG";; m) MAX="$OPTARG";;
+    L) links=1;; I) images=1;; j) js=1;; S) scroll=1;; F) full=1;; r) refresh=1;;
+    h) usage; exit 0;; *) usage; exit 1;;
+  esac
+done
+shift $((OPTIND-1))
+url="${1:?url required}"
+
+mkdir -p "$CACHE"
+key=$(printf '%s|%s|%s|%s' "$url" "$js" "$full" "$scroll" | perl -MDigest::MD5=md5_hex -e 'local $/; print md5_hex(<STDIN>)')
+raw="$CACHE/$key.md"
+hit="cache"
+if [ "$refresh" = 1 ] || [ ! -s "$raw" ] || [ -n "$(find "$raw" -mmin +"$TTL_MIN" 2>/dev/null)" ]; then
+  hit="live"
+  args=(scrape "$url" --markdown)
+  [ "$full" = 1 ] && args+=(--full-page)
+  if [ "$js" = 1 ]; then args+=(--browser always --timeout 45000); fi
+  [ "$scroll" = 1 ] && export FIRECRAWL_LOCAL_SCROLL=1
+  "$FCL" "${args[@]}" > "$raw.tmp" 2> "$raw.err" || { cat "$raw.err" >&2; rm -f "$raw.tmp"; exit 1; }
+  mv "$raw.tmp" "$raw"
+  # surface firecrawl warnings (e.g. "needed a browser", "blocked") in one line
+  [ -s "$raw.err" ] && { tr '\n' ' ' < "$raw.err" | cut -c1-300 >&2; echo >&2; }
+fi
+
+out=$(FC_LINKS=$links FC_IMAGES=$images perl -0777 -pe '
+  unless ($ENV{FC_IMAGES}) {
+    s/!\[[^\]]*\]\([^)]*\)//g;                 # images
+    s/\[\s*\]\((?:[^()]|\([^)]*\))*\)//g;      # empty links left behind
+  }
+  unless ($ENV{FC_LINKS}) {
+    s/\[([^\]]+)\]\((?:[^()]|\([^)]*\))*\)/$1/g;  # [text](url) -> text
+    s/<https?:[^>\s]+>//g;
+  }
+  s/^(\|.*)$/ my $l=$1; $l =~ s{ {2,}}{ }g; $l =~ s{\|\s*:?-{3,}:?\s*(?=\|)}{|-}g; $l /mge;  # de-pad tables
+  s/[ \t]+$//mg;
+  s/\n{3,}/\n\n/g;
+' "$raw")
+
+if [ "$toc" = 1 ]; then
+  out=$(printf '%s\n' "$out" | grep -E '^#{1,6} ' || true)
+elif [ -n "$sec" ]; then
+  out=$(printf '%s\n' "$out" | FC_SEC="$sec" perl -ne '
+    BEGIN { $re = qr/$ENV{FC_SEC}/i; $lvl = 0 }
+    if (/^(#{1,6})\s+(.*)/) {
+      my $l = length $1;
+      if ($lvl && $l <= $lvl) { $lvl = 0 }
+      if (!$lvl && $2 =~ $re) { $lvl = $l }
+    }
+    print if $lvl;')
+fi
+if [ -n "$grep_re" ]; then
+  out=$(printf '%s\n' "$out" | grep -i -E -C1 -- "$grep_re" || true)
+fi
+
+rawn=$(wc -c < "$raw" | tr -d ' ')
+n=${#out}
+if [ "$MAX" != 0 ] && [ "$n" -gt "$MAX" ]; then
+  out="${out:0:$MAX}
+…[truncated $((n-MAX)) chars — narrow with -t / -s / -g, or -m 0]"
+fi
+printf '<!-- fc %s | %s chars ≈%s tok (raw %s) | %s -->\n%s\n' "$url" "$n" "$((n/4))" "$rawn" "$hit" "$out"
