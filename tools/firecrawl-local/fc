@@ -60,9 +60,14 @@ if [ "$refresh" = 1 ] || [ ! -s "$raw" ] || [ -n "$(find "$raw" -mmin +"$TTL_MIN
   if [ "$js" = 1 ]; then args+=(--browser always --timeout 45000); fi
   [ "$scroll" = 1 ] && export FIRECRAWL_LOCAL_SCROLL=1
   "$FCL" "${args[@]}" > "$raw.tmp" 2> "$raw.err" || { cat "$raw.err" >&2; rm -f "$raw.tmp"; exit 1; }
-  mv "$raw.tmp" "$raw"
   # surface firecrawl warnings (e.g. "needed a browser", "blocked") in one line
   [ -s "$raw.err" ] && { tr '\n' ' ' < "$raw.err" | cut -c1-300 >&2; echo >&2; }
+  # never cache blocked / empty / incomplete results
+  if [ "$(wc -c < "$raw.tmp")" -lt 200 ] || grep -qiE 'did not serve|blocked|probably incomplete|could not' "$raw.err" 2>/dev/null; then
+    mv "$raw.tmp" "$raw.nocache"; raw="$raw.nocache"; hit="live, not cached"
+  else
+    mv "$raw.tmp" "$raw"
+  fi
 fi
 
 out=$(FC_LINKS=$links FC_IMAGES=$images perl -0777 -pe '
