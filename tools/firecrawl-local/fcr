@@ -85,7 +85,14 @@ out=$(FC_LINKS=$links FC_IMAGES=$images perl -0777 -pe '
 ' "$raw")
 
 if [ "$toc" = 1 ]; then
-  out=$(printf '%s\n' "$out" | grep -E '^#{1,6} ' || true)
+  full_out="$out"
+  # headings, plus bold-only lines (catalogs often use **Name** instead of #)
+  out=$(printf '%s\n' "$full_out" | grep -E '^#{1,6} |^\*\*[^*]+\*\*$' || true)
+  if [ -z "$out" ]; then
+    # no structure: skim the first 40 non-empty lines, 100 chars each
+    out="(no headings — skim of first lines; use -g to target)
+$(printf '%s\n' "$full_out" | grep -v '^[[:space:]]*$' | head -40 | cut -c1-100)"
+  fi
 elif [ -n "$sec" ]; then
   out=$(printf '%s\n' "$out" | FC_SEC="$sec" perl -ne '
     BEGIN { $re = qr/$ENV{FC_SEC}/i; $lvl = 0 }
