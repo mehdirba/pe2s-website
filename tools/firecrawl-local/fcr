@@ -104,7 +104,8 @@ elif [ -n "$sec" ]; then
     print if $lvl;')
 fi
 if [ -n "$grep_re" ]; then
-  out=$(printf '%s\n' "$out" | grep -i -E -C1 -- "$grep_re" || true)
+  # drop blank lines first so context = real neighbouring lines; no "--" separators
+  out=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | grep -i -E -C1 -- "$grep_re" | grep -v '^--$' || true)
 fi
 
 rawn=$(wc -c < "$raw" | tr -d ' ')
